@@ -408,12 +408,78 @@ class JSONTreeApp(App):
 
     def handle_base64(result: Base64Result | None) -> None:
       if result and result.replacement_value is not None:
+        replacement: Any = result.replacement_value
+        if result.decoded_text is not None:
+          text = result.decoded_text
+          stripped = text.lstrip()
+          if stripped.startswith("{") or stripped.startswith("["):
+            try:
+              parsed = json.loads(text)
+            except json.JSONDecodeError:
+              parsed = None
+            else:
+              replacement = parsed
         try:
-          set_by_path(self.data, meta.path, result.replacement_value)
+          set_by_path(self.data, meta.path, replacement)
         except Exception as e:
           self.push_screen(ValueViewer("Error", f"Failed to replace value: {e!r}"))
+          return
+        self._refresh_tree_after_value_change(meta.path)
 
     self.push_screen(screen, callback=handle_base64)
+
+  def _find_node_by_path(self, path: Path) -> Tree.Node | None:
+    tree = self.query_one(Tree)
+    stack: List[Tree.Node] = [tree.root]
+    while stack:
+      node = stack.pop()
+      node_meta: NodeMeta = node.data
+      if node_meta.path == path:
+        return node
+      stack.extend(node.children)
+    return None
+
+  def _refresh_tree_after_value_change(self, path: Path) -> None:
+    new_value = get_by_path(self.data, path) if path else self.data
+    is_branch = isinstance(new_value, (dict, list))
+    if not path:
+      tree = self.query_one(Tree)
+      node = tree.root
+      meta: NodeMeta = node.data
+      if isinstance(new_value, dict):
+        meta.kind = "dict"
+      elif isinstance(new_value, list):
+        meta.kind = "list"
+      else:
+        meta.kind = "leaf"
+      node.allow_expand = meta.kind in ("dict", "list")
+      node.remove_children()
+      if meta.kind in ("dict", "list"):
+        meta.loaded = False
+        self._populate_children(node)
+        if is_branch:
+          node.expand()
+      else:
+        meta.loaded = True
+      return
+
+    parent_path = path[:-1]
+    parent_node = self._find_node_by_path(parent_path)
+    if parent_node is None:
+      return
+    parent_meta: NodeMeta = parent_node.data
+    if parent_meta.kind not in ("dict", "list"):
+      return
+    parent_meta.loaded = False
+    self._populate_children(parent_node)
+    if is_branch:
+      parent_node.expand()
+      new_node = self._find_node_by_path(path)
+      if new_node is not None:
+        new_meta: NodeMeta = new_node.data
+        new_meta.loaded = False
+        self._populate_children(new_node)
+        new_node.expand()
 
   def _edit_leaf(self, node: Tree.Node) -> None:
     meta: NodeMeta = node.data
